@@ -7,6 +7,7 @@ Copyright (C) 2024 Apple Inc. All Rights Reserved.
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +64,45 @@ def run(args):
         except Exception as e:
             LOGGER.error(str(e))
             continue
+
+        # Export the DepthPro model to an ONNX file
+        if args.export_model:
+            # need to bring image to the format used in model's forward() call
+            input_tensor = transform(image).clone()
+            if len(input_tensor.shape) == 3:
+                input_tensor = input_tensor.unsqueeze(0)
+                _, _, H, W = input_tensor.shape
+                resize = H != model.img_size or W != model.img_size
+
+            if resize:
+                input_tensor = torch.nn.functional.interpolate(
+                    input_tensor,
+                    size=(model.img_size, model.img_size),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+            onnx_file_name = "DepthPro.onnx"
+            model_cpu = model.to("cpu")
+            input_tensor_cpu = input_tensor.to("cpu")
+
+            with torch.no_grad():
+                torch.onnx.export(
+                    model.to("cuda"),                     # model being run
+                    input_tensor,                         # model input (or a tuple for multiple inputs)
+                    onnx_file_name,                       # where to save the model (path)
+                    export_params=True,                   # store the trained parameter weights
+                    opset_version=17,                     # ONNX opset version (try 17 or higher)
+                    do_constant_folding=False,            # optimize constant folding
+                    #dynamo=True,
+                    input_names=["input"],                # name of input tensor(s)
+                    output_names=["output"],              # name of output tensor(s)
+                    dynamic_axes={                        # allow variable size inputs
+                        "input": {0: "batch_size"},
+                        "output": {0: "batch_size"},
+                    })
+                LOGGER.info(f"Export model to {onnx_file_name}.")
+
         # Run prediction. If `f_px` is provided, it is used to estimate the final metric depth,
         # otherwise the model estimates `f_px` to compute the depth metricness.
         prediction = model.infer(transform(image), f_px=f_px)
@@ -145,6 +185,12 @@ def main():
         "--verbose", 
         action="store_true", 
         help="Show verbose output."
+    )
+    parser.add_argument(
+        "-em",
+        "--export-model",
+        action="store_true",
+        help="Export the DepthPro model to an onnx file."
     )
     
     run(parser.parse_args())
